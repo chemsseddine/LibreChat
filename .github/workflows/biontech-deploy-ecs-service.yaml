@@ -1,0 +1,246 @@
+name: Deploy ECS Service - DEV
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Docker image tag to deploy'
+        required: true
+        default: 'latest'
+      image_name: 
+        description: 'Docker image name'
+        required: true
+        default: 'chatbnt-librechat-dev'
+      ecs_service:
+        description: 'ECS Service name'
+        required: true
+        default: 'chatbnt-dev-librechat-svc'
+      ecs_cluster:
+        description: 'ECS Cluster name'
+        required: true
+        default: 'chatbnt-ecs'
+      aws_oidc_role:
+        description: ARN of OIDC role with AWS access
+        required: true
+        default: "arn:aws:iam::260883558719:role/gh-oidc-genai-librechat-deployment_role"
+        type: string
+      force_new_deployment:
+        description: 'Force new deployment'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      additional_env_vars:
+        description: |
+          Additional environment variables (JSON array format)
+          Example: [{"name":"LOG_LEVEL","value":"debug"},{"name":"FEATURE_FLAG","value":"true"}]
+          Leave empty to keep existing environment variables unchanged
+        required: false
+        type: string
+        default: '[]'
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: eu-central-1
+  JFROG_REGISTRY: artifactory.bion.tech
+  JFROG_REPOSITORY: genai-platform-dev-docker
+
+jobs:
+  deploy:
+    name: Deploy to ECS DEV
+    runs-on: ubuntu-latest
+    environment: dev
+    
+    steps:
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@010d0da01d0b5a38af31e9c3470dbfdabdecca3a
+        with:
+          role-to-assume: ${{ inputs.aws_oidc_role }}
+          aws-region: ${{ env.AWS_REGION }}  
+      
+      - name: Log into Artifactory as docker registry
+        uses: biontech-qm/bnt-reusable-gh-actions/docker-login@v1.9.10
+        with:
+          registry: ${{ env.JFROG_REGISTRY }}
+
+      - name: Verify image exists in JFrog
+        env:    
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+        run: |
+          FULL_IMAGE="${JFROG_REGISTRY}/${JFROG_REPOSITORY}/${IMAGE_NAME}:${IMAGE_TAG}"
+          echo "Checking image: $FULL_IMAGE"
+          
+          if docker manifest inspect "$FULL_IMAGE" > /dev/null 2>&1; then
+            echo "✅ Image found in JFrog registry"
+            echo "full_image=$FULL_IMAGE" >> $GITHUB_ENV
+          else
+            echo "❌ Image not found in JFrog registry!"
+            exit 1
+          fi
+
+      - name: Get current task definition
+        id: get-task-def
+        run: |
+          TASK_DEFINITION=$(aws ecs describe-services \
+            --cluster ${{ inputs.ecs_cluster }} \
+            --services ${{ inputs.ecs_service }} \
+            --query 'services[0].taskDefinition' \
+            --output text)
+          
+          echo "current_task_def=$TASK_DEFINITION" >> $GITHUB_OUTPUT
+          echo "Current task definition: $TASK_DEFINITION"
+          
+          # Download the task definition
+          aws ecs describe-task-definition \
+            --task-definition $TASK_DEFINITION \
+            --query 'taskDefinition' > task-definition.json
+
+      - name: Validate additional environment variables
+        if: ${{ inputs.additional_env_vars != '[]' && inputs.additional_env_vars != '' }}
+        env:
+          ENV_VARS: ${{ inputs.additional_env_vars }}
+        run: |
+          echo "Validating environment variables JSON format..."
+
+          # Validate JSON format
+          if ! echo "$ENV_VARS" | jq empty 2>/dev/null; then
+            echo "❌ Error: Invalid JSON format for additional_env_vars"
+            echo "Expected format: [{'name':'VAR1','value':'value1'},{'name':'VAR2','value':'value2'}]"
+            exit 1
+          fi
+
+          # Validate structure (array of objects with 'name' and 'value')
+          if ! echo "$ENV_VARS" | jq -e 'if type == "array" then all(type == "object" and has("name") and has("value")) else false end' > /dev/null; then
+            echo "❌ Error: Invalid structure for additional_env_vars"
+            echo "Each element must be an object with 'name' and 'value' keys"
+            echo "Example: [{'name':'LOG_LEVEL','value':'debug'}]"
+            exit 1
+          fi
+
+          echo "✅ Environment variables validation passed"
+          echo "$ENV_VARS" | jq -r '.[] | "  - \(.name) = \(.value)"'
+
+      - name: Update task definition with new image
+        id: update-task-def
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+          ADDITIONAL_ENV_VARS: ${{ inputs.additional_env_vars }}
+        run: |
+          # Build the full image path for JFrog
+          NEW_IMAGE="${JFROG_REGISTRY}/${JFROG_REPOSITORY}/${IMAGE_NAME}:${IMAGE_TAG}"
+          echo "New image: $NEW_IMAGE"
+
+          # Update the container image (adjust container name/index as needed)
+          jq --arg IMAGE "$NEW_IMAGE" \
+            '.containerDefinitions[0].image = $IMAGE' \
+            task-definition.json > new-task-definition.json
+
+          # Add/merge additional environment variables if provided
+          if [ "$ADDITIONAL_ENV_VARS" != "[]" ] && [ -n "$ADDITIONAL_ENV_VARS" ]; then
+            echo "Adding additional environment variables..."
+
+            # Get existing environment variables
+            EXISTING_ENV=$(jq '.containerDefinitions[0].environment // []' new-task-definition.json)
+
+            # Parse new environment variables
+            NEW_ENV=$(echo "$ADDITIONAL_ENV_VARS" | jq -c '.')
+
+            # Merge: new variables override existing ones with same name
+            MERGED_ENV=$(jq -n \
+              --argjson existing "$EXISTING_ENV" \
+              --argjson new "$NEW_ENV" \
+              '($existing + $new) | group_by(.name) | map(last)')
+
+            # Update task definition with merged environment variables
+            jq --argjson env "$MERGED_ENV" \
+              '.containerDefinitions[0].environment = $env' \
+              new-task-definition.json > temp-task-definition.json
+
+            mv temp-task-definition.json new-task-definition.json
+
+            echo "Environment variables added:"
+            echo "$NEW_ENV" | jq -r '.[] | "  - \(.name) = \(.value)"'
+          fi
+
+          # Remove fields that can't be used in register-task-definition
+          jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)' \
+            new-task-definition.json > final-task-definition.json
+
+          echo "Updated task definition:"
+          cat final-task-definition.json
+
+      - name: Register new task definition
+        id: register-task-def
+        run: |
+          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://final-task-definition.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          
+          echo "new_task_def_arn=$NEW_TASK_DEF_ARN" >> $GITHUB_OUTPUT
+          echo "Registered new task definition: $NEW_TASK_DEF_ARN"
+
+      - name: Update ECS service
+        id: update-service
+        run: |
+          FORCE_FLAG=""
+          if [ "${{ inputs.force_new_deployment }}" = "true" ]; then
+            FORCE_FLAG="--force-new-deployment"
+          fi
+          
+          aws ecs update-service \
+            --cluster ${{ inputs.ecs_cluster }} \
+            --service ${{ inputs.ecs_service }} \
+            --task-definition ${{ steps.register-task-def.outputs.new_task_def_arn }} \
+            $FORCE_FLAG
+          
+          echo "✅ ECS service update initiated"
+
+      - name: Wait for service stability
+        run: |
+          echo "Waiting for service to reach stable state..."
+          aws ecs wait services-stable \
+            --cluster ${{ inputs.ecs_cluster }} \
+            --services ${{ inputs.ecs_service }}
+          
+          echo "✅ Service is stable!"
+
+      - name: Get deployment status
+        if: always()
+        run: |
+          aws ecs describe-services \
+            --cluster ${{ inputs.ecs_cluster }} \
+            --services ${{ inputs.ecs_service }} \
+            --query 'services[0].{Status:status,RunningCount:runningCount,DesiredCount:desiredCount,Deployments:deployments[*].{Status:status,TaskDef:taskDefinition,DesiredCount:desiredCount,RunningCount:runningCount}}' \
+            --output table
+
+      - name: Deployment summary
+        env:
+          IMAGE_NAME: ${{ inputs.image_name }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          ADDITIONAL_ENV_VARS: ${{ inputs.additional_env_vars }}
+        run: |
+          echo "## Deployment Summary 🚀" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment:** DEV" >> $GITHUB_STEP_SUMMARY
+          echo "- **Cluster:** ${{ inputs.ecs_cluster }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Service:** ${{ inputs.ecs_service }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image:** ${JFROG_REGISTRY}/${JFROG_REPOSITORY}/${IMAGE_NAME}:${IMAGE_TAG}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Task Definition:** ${{ steps.register-task-def.outputs.new_task_def_arn }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Triggered by:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$ADDITIONAL_ENV_VARS" != "[]" ] && [ -n "$ADDITIONAL_ENV_VARS" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Additional Environment Variables" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "$ADDITIONAL_ENV_VARS" | jq -r '.[] | "\(.name) = \(.value)"' >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi

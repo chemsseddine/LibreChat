@@ -1,11 +1,11 @@
 name: Publish `@librechat/client` to NPM
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'packages/client/package.json'
+  # push:
+  #   branches:
+  #     - main
+  #   paths:
+  #     - 'packages/client/package.json'
   workflow_dispatch:
     inputs:
       reason:

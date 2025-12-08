@@ -1,9 +1,10 @@
 name: Docker Images Build on Tag
 
 on:
-  push:
-    tags:
-      - '*'
+  workflow_dispatch
+  #push:
+  #  tags:
+  #    - '*'
 
 jobs:
   build:

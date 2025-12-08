@@ -1,0 +1,14 @@
+name: Bootstrap GH repo
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+  packages: read
+
+jobs:
+  tf_boostrap:
+    uses: biontech-qm/bnt-reusable-workflows/.github/workflows/tf-bootstrap-gh-repository.yaml@v9.3.0
+    secrets: inherit

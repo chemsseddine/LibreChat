@@ -1,20 +1,21 @@
 name: Frontend Unit Tests
 
 on:
-  pull_request:
-    branches: 
-      - main
-      - dev
-      - release/*
-    paths:
-      - 'client/**'
-      - 'packages/data-provider/**'
+  workflow_dispatch
+  # pull_request:
+  #   branches: 
+  #     - main
+  #     - dev
+  #     - release/*
+  #   paths:
+  #     - 'client/**'
+  #     - 'packages/data-provider/**'
 
 jobs:
   tests_frontend_ubuntu:
     name: Run frontend unit tests on Ubuntu
     timeout-minutes: 60
-    runs-on: ubuntu-latest
+    runs-on: LargerGitHubRunner4Core150GB
     steps:
       - uses: actions/checkout@v4
       - name: Use Node.js 20.x
@@ -36,7 +37,7 @@ jobs:
   tests_frontend_windows:
     name: Run frontend unit tests on Windows
     timeout-minutes: 60
-    runs-on: windows-latest
+    runs-on: windows-latest-eu-vnet
     steps:
       - uses: actions/checkout@v4
       - name: Use Node.js 20.x

@@ -1,0 +1,145 @@
+name: Build and Push to JFrog
+
+permissions: write-all
+
+on:
+  # Development builds and Release builds
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*.*.*'
+      - 'v*.*.*-rc*'
+  
+  # Manual builds
+  workflow_dispatch:
+    inputs:
+      custom_tag:
+        description: 'Custom tag (optional)'
+        required: false
+        type: string
+
+jobs:
+  determine-tags:
+    runs-on: ubuntu-latest
+    outputs:
+      image_tags: ${{ steps.tags.outputs.tags }}
+      version: ${{ steps.tags.outputs.version }}
+    
+    steps:
+      - name: Determine image tags
+        id: tags
+        run: |
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          
+          if [[ "${{ github.event_name }}" == "push" ]] && [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            # RELEASE BUILD from tag
+            VERSION=${GITHUB_REF#refs/tags/v}
+            
+            if [[ "$VERSION" == *"-rc"* ]]; then
+              # Release Candidate
+              TAGS="${VERSION}, rc-latest"
+            else
+              # Production Release
+              TAGS="${VERSION}, latest"
+            fi
+            
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # MANUAL BUILD
+            VERSION="manual-${SHORT_SHA}"
+            TAGS="manual-${SHORT_SHA}"
+            
+            if [[ -n "${{ inputs.custom_tag }}" ]]; then
+              TAGS="${TAGS}, ${{ inputs.custom_tag }}"
+              VERSION="${{ inputs.custom_tag }}"
+            fi
+            
+          else
+            # MAIN BRANCH BUILD (default dev)
+            VERSION="dev-${SHORT_SHA}"
+            TAGS="${VERSION}"
+          fi
+          
+          # Output tags
+          echo "tags=${TAGS}" >> $GITHUB_OUTPUT
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          
+          # Summary
+          echo "### Build Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** \`${VERSION}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image Name:** \`chatbnt-librechat-dev\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **JFrog Repository:** \`genai-platform-dev-docker\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image Tags:** \`${TAGS}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Full Image Reference:**" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "artifactory.bion.tech/genai-platform-dev-docker/chatbnt-librechat-dev:${VERSION}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+  docker-build-push:
+    needs: determine-tags
+    uses: biontech-qm/bnt-reusable-workflows/.github/workflows/docker-cd.yaml@v9.3.0
+    permissions: write-all
+    secrets: inherit
+    with:
+      environment: dev
+      image_name: chatbnt-librechat-dev
+      dockerfile: ./Dockerfile
+      image_tags: ${{ needs.determine-tags.outputs.image_tags }}
+      jfrog_repository: genai-platform-dev-docker
+      jfrog_build_name: "ChatBNT LibreChat Dev"
+  
+  create-release:
+    needs: [determine-tags, docker-build-push]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-rc')
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Generate changelog
+        id: changelog
+        run: |
+          PREV_TAG=$(git describe --abbrev=0 --tags $(git rev-list --tags --skip=1 --max-count=1) 2>/dev/null || echo "")
+          
+          if [[ -n "$PREV_TAG" ]]; then
+            CHANGELOG=$(git log ${PREV_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges)
+          else
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" --no-merges)
+          fi
+          
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+      
+      - name: Create GitHub Release
+        run: |
+          cat > release-notes.md << 'EOF'
+          ## 🚀 Release ${{ needs.determine-tags.outputs.version }}
+          
+          ### Changes
+          ${{ steps.changelog.outputs.changelog }}
+          
+          ### 🐳 Docker Image
+          ```
+          artifactory.bion.tech/genai-platform-dev-docker/chatbnt-librechat-dev:${{ needs.determine-tags.outputs.version }}
+          ```
+        
+          ### 📦 Available Tags 
+          ```
+          ${{ needs.determine-tags.outputs.image_tags }}
+          ```
+          
+          ### 🚀 Deploy to Production
+          update terraform configurations dev.tfvars, int.tfvars and prd.tfvars in repository and deploy: 
+          https://github.com/biondata/genai-chatbnt-infrastructure/tree/main/infrastructure/main
+          EOF
+          
+          gh release create ${{ github.ref_name }} \
+            --title "Release ${{ needs.determine-tags.outputs.version }}" \
+            --notes-file release-notes.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
