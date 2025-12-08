@@ -1,0 +1,32 @@
+# Git attributes for merge strategy
+# This file tells Git to always use "ours" (your local version) for specific paths during merges
+# This prevents conflicts when syncing with upstream
+
+# Configuration files - always keep your version
+config/** merge=ours
+librechat.yaml merge=ours
+librechat.yml merge=ours
+
+# CI/CD workflows - always keep your version
+.github/** merge=ours
+
+# Helm charts - always keep your version (if customized)
+helm/** merge=ours
+
+# Docker compose files - always keep your version
+docker-compose.yml merge=ours
+docker-compose.override.yml merge=ours
+docker-compose.override.yml.example merge=ours
+deploy-compose.yml merge=ours
+
+# Custom update tools - always keep your version
+update-tools/** merge=ours
+
+# Package configuration (if you have custom dependencies)
+package.json merge=ours
+package-lock.json merge=ours
+
+# README and documentation (if customized)
+README.md merge=ours
+DEVELOPMENT.md merge=ours
+CHANGELOG.md merge=ours
