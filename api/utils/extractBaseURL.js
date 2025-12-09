@@ -17,6 +17,7 @@ const { CohereConstants } = require('librechat-data-provider');
  * @returns {string | undefined} The matched pattern or input if no match is found.
  */
 function extractBaseURL(url) {
+  console.log('extractBaseURL', url);
   if (!url || typeof url !== 'string') {
     return undefined;
   }
