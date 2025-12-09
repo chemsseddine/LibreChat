@@ -6,6 +6,7 @@ const { logger } = require('@librechat/data-schemas');
  * @returns {string} The base URL.
  */
 function deriveBaseURL(fullURL) {
+  logger.info('Deriving base URL from', fullURL);
   try {
     const parsedUrl = new URL(fullURL);
     const protocol = parsedUrl.protocol;
